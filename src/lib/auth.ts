@@ -1,15 +1,16 @@
-import { prisma } from "@/lib/prisma" // Standardized named import
+import { PrismaAdapter } from "@next-auth/prisma-adapter"
+import prisma from "@/lib/prisma"
 import Credentials from "next-auth/providers/credentials"
 import bcrypt from "bcryptjs"
 import type { NextAuthOptions } from "next-auth"
+import { Role } from "@prisma/client"
 
 export const authOptions: NextAuthOptions = {
-  // 💡 Senior Tip: When using "credentials", NextAuth automatically uses JWT. 
-  // We keep the adapter for future OAuth (Google/GitHub) support, 
-  // but explicitly set strategy to "jwt" for speed.
+  adapter: PrismaAdapter(prisma),
+
   session: {
     strategy: "jwt",
-    maxAge: 30 * 24 * 60 * 60, // 30 Days
+    maxAge: 30 * 24 * 60 * 60, // 30 days
   },
 
   providers: [
@@ -21,77 +22,75 @@ export const authOptions: NextAuthOptions = {
       },
 
       async authorize(credentials) {
-        // 1. Validate input exists
         if (!credentials?.email || !credentials?.password) {
-          throw new Error("Missing email or password");
+          throw new Error("Missing credentials")
         }
 
-        // 2. Fetch user from DB
         const user = await prisma.user.findUnique({
-          where: { email: credentials.email.toLowerCase() }, // Case-insensitive safety
-        });
+          where: { email: credentials.email },
+        })
 
-        // 3. User existence & Password check
-        if (!user || !user.password) {
-          throw new Error("Invalid email or password");
+        if (!user) {
+          throw new Error("No user found with this email")
         }
 
-        const isPasswordValid = await bcrypt.compare(
+        const isValid = await bcrypt.compare(
           credentials.password,
           user.password
-        );
+        )
 
-        if (!isPasswordValid) {
-          throw new Error("Invalid email or password");
+        if (!isValid) {
+          throw new Error("Incorrect password")
         }
 
-        // 4. Permission Check
-        // Allow Teachers through regardless, check approval for Students
-        if (user.role === "STUDENT" && !user.isApproved) {
-          throw new Error("PENDING_APPROVAL");
+        if (!user.isApproved) {
+          throw new Error("Your account is pending teacher approval.")
         }
 
-        // 5. Return object for JWT
+        // ✅ Return only what we need to store in the token
         return {
           id: user.id,
           email: user.email,
           name: user.name,
           role: user.role,
-        };
+        }
       },
     }),
   ],
 
   callbacks: {
     async jwt({ token, user, trigger, session }) {
-      // Runs on login - transfer data from User object to Token
+      // 🚀 INITIAL LOGIN: Attach role to the token
       if (user) {
-        token.id = user.id;
-        token.role = user.role;
+        token.id = user.id
+        token.role = user.role
       }
 
-      // Handle session updates (e.g., if role changes without logging out)
-      if (trigger === "update" && session) {
-        return { ...token, ...session.user };
+      // 💡 OPTIONAL: Handle manual session updates
+      if (trigger === "update" && session?.role) {
+        token.role = session.role
       }
 
-      return token;
+      // ❌ REMOVED: prisma.user.findUnique here. 
+      // We trust the JWT. If the user is unapproved later, 
+      // they will be logged out when the token expires 
+      // or you can add a small check only on critical actions.
+
+      return token
     },
 
     async session({ session, token }) {
-      // Transfer data from Token to Session object for use in components
-      if (token && session.user) {
-        session.user.id = token.id as string;
-        session.user.role = token.role as any; // Cast to your Prisma Role
+      if (session.user) {
+        session.user.id = token.id as string
+        session.user.role = token.role as Role
       }
-      return session;
+      return session
     },
   },
 
   pages: {
-    signIn: "/", // UI: Where your login dialog is
-    error: "/",  // UI: Redirect home if login fails
+    signIn: "/", // Redirects to your landing page with the AuthDialog
   },
-
+  
   secret: process.env.NEXTAUTH_SECRET,
-};
+}
